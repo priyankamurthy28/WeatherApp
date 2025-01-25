@@ -69,7 +69,9 @@ class WeatherService: ObservableObject {
     @Published var error: Error?
     
     func fetchWeatherForCities() async {
-        isLoading = true
+        await MainActor.run {
+            self.isLoading = true
+        }
         weatherData.removeAll()
         
         let cities = ["New York", "London", "Tokyo", "Sydney"]
@@ -93,13 +95,17 @@ class WeatherService: ObservableObject {
             }
         }
         
-        isLoading = false
+        await MainActor.run {
+            self.isLoading = false
+        }
     }
     
     func searchCity(name: String) async {
         guard !name.isEmpty else { return }
         
-        isLoading = true
+        await MainActor.run {
+            self.isLoading = true
+        }
         weatherData.removeAll()
         
         do {
@@ -119,7 +125,9 @@ class WeatherService: ObservableObject {
             self.error = error
         }
         
-        isLoading = false
+        await MainActor.run {
+            self.isLoading = false
+        }
     }
 }
 
@@ -199,7 +207,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .navigationTitle(Text("Weather").bold())
+            .navigationTitle("Weather")
             .task {
                 await weatherService.fetchWeatherForCities()
             }
