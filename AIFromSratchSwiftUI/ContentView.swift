@@ -8,13 +8,119 @@
 import SwiftUI
 import CoreLocation
 
-struct WeatherData: Identifiable {
+// Update WeatherData model to match OpenWeatherMap API response
+struct WeatherData: Identifiable, Codable {
     let id = UUID()
-    let temperature: Int
+    let temperature: Double
     let condition: String
     let location: String
     let humidity: Int
-    let windSpeed: Int
+    let windSpeed: Double
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: RootCodingKeys.self)
+        
+        let main = try container.decode(Main.self, forKey: .main)
+        let weather = try container.decode([Weather].self, forKey: .weather)
+        let wind = try container.decode(Wind.self, forKey: .wind)
+        
+        temperature = main.temp
+        humidity = main.humidity
+        condition = weather.first?.description ?? "Unknown"
+        location = try container.decode(String.self, forKey: .name)
+        windSpeed = wind.speed
+    }
+    
+    // For current location manual data
+    init(temperature: Double, condition: String, location: String, humidity: Int, windSpeed: Double) {
+        self.temperature = temperature
+        self.condition = condition
+        self.location = location
+        self.humidity = humidity
+        self.windSpeed = windSpeed
+    }
+    
+    private enum RootCodingKeys: String, CodingKey {
+        case main
+        case weather
+        case wind
+        case name
+    }
+    
+    private struct Main: Codable {
+        let temp: Double
+        let humidity: Int
+    }
+    
+    private struct Weather: Codable {
+        let description: String
+    }
+    
+    private struct Wind: Codable {
+        let speed: Double
+    }
+}
+
+// Update WeatherService with the provided API key
+class WeatherService: ObservableObject {
+    private let apiKey = "83e04a33cff128fd3366f73ecca5dbbc"
+    @Published var weatherData: [WeatherData] = []
+    @Published var isLoading = false
+    @Published var error: Error?
+    
+    func fetchWeatherForCities() async {
+        isLoading = true
+        weatherData.removeAll()
+        
+        let cities = ["New York", "London", "Tokyo", "Sydney"]
+        
+        for city in cities {
+            do {
+                let encodedCity = city.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? city
+                let urlString = "https://api.openweathermap.org/data/2.5/weather?q=\(encodedCity)&appid=\(apiKey)&units=metric"
+                
+                guard let url = URL(string: urlString) else { continue }
+                
+                let (data, _) = try await URLSession.shared.data(from: url)
+                let weather = try JSONDecoder().decode(WeatherData.self, from: data)
+                
+                DispatchQueue.main.async {
+                    self.weatherData.append(weather)
+                }
+            } catch {
+                print("Error fetching weather for \(city): \(error)")
+                self.error = error
+            }
+        }
+        
+        isLoading = false
+    }
+    
+    func searchCity(name: String) async {
+        guard !name.isEmpty else { return }
+        
+        isLoading = true
+        weatherData.removeAll()
+        
+        do {
+            let encodedCity = name.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? name
+            let urlString = "https://api.openweathermap.org/data/2.5/weather?q=\(encodedCity)&appid=\(apiKey)&units=metric"
+            
+            guard let url = URL(string: urlString) else { return }
+            
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let weather = try JSONDecoder().decode(WeatherData.self, from: data)
+            
+            DispatchQueue.main.async {
+                self.weatherData = [weather]
+            }
+        } catch {
+            print("Error searching city \(name): \(error)")
+            self.error = error
+        }
+        
+        isLoading = false
+    }
 }
 
 class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
@@ -37,25 +143,9 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
 
 struct ContentView: View {
     @StateObject private var locationManager = LocationManager()
+    @StateObject private var weatherService = WeatherService()
     @State private var searchText = ""
     @State private var isSearching = false
-    
-    // Sample weather data for four cities
-    let cities = [
-        WeatherData(temperature: 23, condition: "Sunny", location: "New York", humidity: 65, windSpeed: 12),
-        WeatherData(temperature: 18, condition: "Cloudy", location: "London", humidity: 75, windSpeed: 15),
-        WeatherData(temperature: 28, condition: "Clear", location: "Tokyo", humidity: 60, windSpeed: 8),
-        WeatherData(temperature: 32, condition: "Partly Cloudy", location: "Sydney", humidity: 70, windSpeed: 10)
-    ]
-    
-    // Filtered cities based on search
-    var filteredCities: [WeatherData] {
-        if searchText.isEmpty {
-            return cities
-        } else {
-            return cities.filter { $0.location.lowercased().contains(searchText.lowercased()) }
-        }
-    }
     
     var body: some View {
         NavigationView {
@@ -68,13 +158,22 @@ struct ContentView: View {
                 .ignoresSafeArea()
                 
                 VStack(spacing: 0) {
-                    // Search Bar at top
                     SearchBar(searchText: $searchText, isSearching: $isSearching)
                         .padding(.top, 10)
+                        .onChange(of: searchText) { newValue in
+                            if newValue.isEmpty {
+                                Task {
+                                    await weatherService.fetchWeatherForCities()
+                                }
+                            } else {
+                                Task {
+                                    await weatherService.searchCity(name: newValue)
+                                }
+                            }
+                        }
                     
                     ScrollView {
                         VStack(spacing: 20) {
-                            // Show current location only when not searching
                             if searchText.isEmpty, let _ = locationManager.location {
                                 WeatherCard(weather: WeatherData(
                                     temperature: 25,
@@ -86,13 +185,11 @@ struct ContentView: View {
                                 .padding(.top)
                             }
                             
-                            // Filtered City Weather Cards
-                            ForEach(filteredCities) { city in
-                                WeatherCard(weather: city)
+                            ForEach(weatherService.weatherData) { weather in
+                                WeatherCard(weather: weather)
                             }
                             
-                            // Show message if no cities found
-                            if filteredCities.isEmpty && !searchText.isEmpty {
+                            if weatherService.weatherData.isEmpty && !searchText.isEmpty {
                                 Text("No cities found")
                                     .foregroundColor(.white)
                                     .padding()
@@ -103,6 +200,9 @@ struct ContentView: View {
                 }
             }
             .navigationTitle(Text("Weather").bold())
+            .task {
+                await weatherService.fetchWeatherForCities()
+            }
         }
     }
 }
@@ -160,7 +260,7 @@ struct WeatherCard: View {
                         .renderingMode(.original)
                         .font(.system(size: 40))
                     
-                    Text("\(weather.temperature)°")
+                    Text("\(Int(round(weather.temperature)))°")
                         .font(.system(size: 50, weight: .bold))
                         .foregroundColor(.white)
                 }
@@ -169,7 +269,7 @@ struct WeatherCard: View {
                 
                 VStack(alignment: .trailing, spacing: 10) {
                     WeatherDetailItem(icon: "humidity", value: "\(weather.humidity)%")
-                    WeatherDetailItem(icon: "wind", value: "\(weather.windSpeed) km/h")
+                    WeatherDetailItem(icon: "wind", value: "\(Int(round(weather.windSpeed))) km/h")
                 }
             }
         }
